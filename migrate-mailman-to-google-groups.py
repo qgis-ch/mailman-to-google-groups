@@ -13,6 +13,7 @@
 # At some point I may loop back to figure out how to do multi-part preservation
 # passes since some e-mails had PDFs, M$ docs, etc.
 
+import sys
 import os.path
 
 from google.auth.transport.requests import Request
@@ -61,63 +62,69 @@ def get_credentials():
 
     return creds
 
-def main():
+def main(argv=None):
     """Shows basic usage of the Google Admin-SDK Groups Migration API.
 
     Creates a Google Admin-SDK Groups Migration API service object and
     inserts a test email into a group.
     """
+
+    if argv is None:
+        argv = sys.argv
+
+    if len(argv) != 3:
+        print("Usage: %s mboxInput groupId" % argv[0])
+        return 1
+
+    # Get the input parameter from the command line
+    mbox_in = os.path.abspath(argv[1])
+    groupId = argv[2]
+    
     credentials = get_credentials()
 
+    src_mbox = mailbox.mbox(mbox_in)
+    msg_count = 1
+    msg_total = len(src_mbox)
+
     try:
-        service = build('groupsmigration', 'v1', credentials=credentials)
+        with build('groupsmigration', 'v1', credentials=credentials) as service:
+            for msg in src_mbox:
+                if msg.is_multipart():
+                    found = 0
+                    for part in msg.walk():
+                        if part.get_content_type() == 'text/plain':
+                            found = 1
+                            message = MIMEText(part.get_payload(decode=True), 'plain', 'utf-8')
+                    if not found:
+                        print('No text/plain part found!')
+                        continue
+                else:
+                    message = MIMEText(msg.get_payload(decode=True), 'plain', 'utf-8')
 
-        groupId = input(
-            'Enter the email address of a Google Group in your domain: ')
+                # Reformat the sender field
+                from_raw = msg.get_from().split(" ")
+                from_formatted = "%s@%s" % (from_raw[0], from_raw[2])
 
-        mbox_in = input('Name of mbox to migrate: ')
+                message['Message-ID'] = msg['Message-ID']
+                message['Subject'] = msg['Subject']
+                message['From'] = from_formatted
+                message['To'] = groupId
+                message['Date'] = msg['Date']
 
-        src_mbox = mailbox.mbox(mbox_in)
-        msg_count = 1
-        msg_total = len(src_mbox)
+                stream = StringIO()
+                stream.write(message.as_string())
+                media = MediaIoBaseUpload(stream,
+                                          mimetype='message/rfc822')
 
-        for msg in src_mbox:
-            if msg.is_multipart():
-                found = 0
-                for part in msg.walk():
-                    if part.get_content_type() == 'text/plain':
-                        found = 1
-                        message = MIMEText(part.get_payload(decode=True), 'plain', 'utf-8')
-                if not found:
-                    print('Error! No text/plain part found!')
-                    continue
-            else:
-                message = MIMEText(msg.get_payload(decode=True), 'plain', 'utf-8')
+                result = service.archive().insert(groupId=groupId,
+                                                  media_body=media).execute()
 
-            # Reformat the sender field
-            from_raw = msg.get_from().split(" ")
-            from_formatted = "%s@%s" % (from_raw[0], from_raw[2])
+                if result['responseCode'] != 'SUCCESS':
+                    print('Issue with Message # ', msg_count, ' Message-ID: ', msg['Message-ID'], 'Reponse Code: ', result['responseCode'])
+                else:
+                    print('Working on msg: ', msg_count, ' out of ', msg_total)
 
-            message['Message-ID'] = msg['Message-ID']
-            message['Subject'] = msg['Subject']
-            message['From'] = from_formatted
-            message['To'] = groupId
-            message['Date'] = msg['Date']
-
-            stream = StringIO()
-            stream.write(message.as_string())
-            media = MediaIoBaseUpload(stream,
-                                    mimetype='message/rfc822')
-
-            result = service.archive().insert(groupId=groupId,
-                                            media_body=media).execute()
-
-            if result['responseCode'] != 'SUCCESS':
-                print('Issue with Message # ', msg_count, ' Message-ID: ', msg['Message-ID'], 'Reponse Code: ', result['responseCode'])
-            else:
-                print('Working on msg: ', msg_count, ' out of ', msg_total)
-
-            msg_count += 1
+                msg_count += 1
     except HttpError as err:
         print(err)
         return 1
@@ -125,4 +132,4 @@ def main():
     return 0
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
